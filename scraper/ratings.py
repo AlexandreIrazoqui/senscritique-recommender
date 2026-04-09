@@ -46,50 +46,44 @@ def get_product_ratings(product_id, offset=0, limit=40):
         }
         """
     }
-    response = requests.post(url, headers=headers, json=payload)
-    return response.json()
+    for attempt in range(3):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            return response.json()
+        except Exception as e:
+            print(f"  Retry {attempt+1} ({e})")
+            time.sleep(2)
+    return None
 
 def scrape_all_ratings(product_id):
     all_ratings = []
     offset = 0
     limit = 40
 
-    data = get_product_ratings(product_id, offset=0, limit=limit)
-    actions = data["data"]["product"]["otherUsersActions"]
-    total = actions["total"] if actions["total"] > 0 else len(actions["userActions"]) * 50
-
-    print(f"Total ratings à récupérer : estimé ~{total} (offset-based)")
-
     while True:
         data = get_product_ratings(product_id, offset=offset, limit=limit)
+        if data is None:
+            break
         actions = data["data"]["product"]["otherUsersActions"]["userActions"]
-
         if not actions:
             break
-
         for action in actions:
             all_ratings.append({
                 "product_id": action["productUserInfos"]["productId"],
                 "user_id": action["user"]["id"],
                 "rating": action["productUserInfos"]["rating"]
             })
-
-        print(f"  offset {offset} → {len(all_ratings)} notes collectées")
         offset += limit
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     return all_ratings
 
-def save_to_csv(ratings, filename):
+def save_to_csv(ratings, filename, mode="w"):
     os.makedirs("data/raw", exist_ok=True)
     filepath = f"data/raw/{filename}"
-    with open(filepath, "w", newline="", encoding="utf-8") as f:
+    write_header = mode == "w" or not os.path.exists(filepath)
+    with open(filepath, mode, newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["product_id", "user_id", "rating"])
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         writer.writerows(ratings)
-    print(f"Sauvegardé : {filepath} ({len(ratings)} lignes)")
-
-if __name__ == "__main__":
-    product_id = 81036513
-    ratings = scrape_all_ratings(product_id)
-    save_to_csv(ratings, f"ratings_{product_id}.csv")
