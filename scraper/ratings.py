@@ -37,9 +37,7 @@ def get_product_ratings(product_id, offset=0, limit=40):
                             rating
                             userId
                         }
-                        user {
-                            id
-                        }
+                        user { id }
                     }
                 }
             }
@@ -49,10 +47,12 @@ def get_product_ratings(product_id, offset=0, limit=40):
     for attempt in range(3):
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=10)
-            return response.json()
+            if response.status_code == 200 and response.text.strip():
+                return response.json()
+            print(f"  Retry {attempt+1} (status {response.status_code}, empty={not response.text.strip()})")
         except Exception as e:
             print(f"  Retry {attempt+1} ({e})")
-            time.sleep(2)
+        time.sleep(3)
     return None
 
 def scrape_all_ratings(product_id):
@@ -74,7 +74,7 @@ def scrape_all_ratings(product_id):
                 "rating": action["productUserInfos"]["rating"]
             })
         offset += limit
-        time.sleep(0.3)
+        time.sleep(1)
 
     return all_ratings
 
