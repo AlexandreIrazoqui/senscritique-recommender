@@ -1,75 +1,108 @@
 import requests
 import json
 import os
-import re
 import time
 from dotenv import load_dotenv
 
 load_dotenv()
 
+url = "https://apollo.senscritique.com/"
 headers = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0",
     "authorization": os.getenv("SC_TOKEN"),
+    "content-type": "application/json",
+    "Origin": "https://www.senscritique.com",
+    "Referer": "https://www.senscritique.com/",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0"
 }
 
-def get_build_id():
-    r = requests.get("https://www.senscritique.com", headers=headers)
-    return re.search(r'/_next/static/([^/]+)/_buildManifest', r.text).group(1)
-
-def get_collection_page(build_id, username, page=1, retries=3):
-    url = f"https://www.senscritique.com/_next/data/{build_id}/fr/{username}/collection.json?username={username}&page={page}"
-    for attempt in range(retries):
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200 and response.text.strip():
-            return response.json()
-        print(f"  Retry {attempt+1} page {page} (status {response.status_code})")
-        time.sleep(2)
+def get_collection_page(username, offset=0, limit=18):
+    payload = {
+        "operationName": "UserCollection",
+        "variables": {
+            "action": None,
+            "categoryId": None,
+            "gameSystemId": None,
+            "genreId": None,
+            "keywords": "",
+            "limit": limit,
+            "offset": offset,
+            "order": "LAST_ACTION_DESC",
+            "universe": "movie",
+            "username": username,
+            "yearDateDone": None,
+            "isCollection": True
+        },
+        "query": """
+        query UserCollection($action: ProductAction, $categoryId: Int, $gameSystemId: Int, $genreId: Int, $keywords: String, $limit: Int, $offset: Int, $order: CollectionSort, $universe: String, $username: String!, $yearDateDone: Int, $isCollection: Boolean) {
+            user(username: $username) {
+                collection(
+                    action: $action
+                    categoryId: $categoryId
+                    gameSystemId: $gameSystemId
+                    genreId: $genreId
+                    keywords: $keywords
+                    limit: $limit
+                    offset: $offset
+                    order: $order
+                    universe: $universe
+                    yearDateDone: $yearDateDone
+                    isCollection: $isCollection
+                ) {
+                    total
+                    products {
+                        id
+                        title
+                    }
+                }
+            }
+        }
+        """
+    }
+    for attempt in range(3):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            if response.status_code == 200 and response.text.strip():
+                return response.json()
+            print(f"  Retry {attempt+1} (status {response.status_code})")
+        except Exception as e:
+            print(f"  Retry {attempt+1} ({e})")
+        time.sleep(3)
     return None
-
-def extract_product_ids(data, universe_filter=1):
-    apollo_state = data["pageProps"]["__APOLLO_STATE__"]
-    ids = []
-    for key, value in apollo_state.items():
-        if key.startswith("Product:"):
-            if value.get("universe") == universe_filter:
-                ids.append(value["id"])
-    return ids
-
-def get_total_pages(data):
-    apollo_state = data["pageProps"]["__APOLLO_STATE__"]
-    for key, value in apollo_state.items():
-        if key.startswith("User:"):
-            # 18 produits par page
-            total = value.get("stats", {}).get("ratingCount", 0)
-            return (total // 18) + 1
-    return 1
 
 if __name__ == "__main__":
     username = "Moizi"
-    all_ids = set()
+    all_ids = []
+    offset = 0
+    limit = 18
+    total = None
 
-    print("Récupération du build ID...")
-    build_id = get_build_id()
-    print(f"Build ID: {build_id}")
-
-    # Test page 1 pour avoir le total
-    data = get_collection_page(build_id, username, page=1)
-    total_pages = get_total_pages(data)
-    ids = extract_product_ids(data, universe_filter=1)
-    all_ids.update(ids)
-    print(f"Page 1 → {len(ids)} films, total pages estimé: {total_pages}")
-
-    for page in range(2, total_pages + 1):
-        data = get_collection_page(build_id, username, page)
+    while True:
+        data = get_collection_page(username, offset=offset, limit=limit)
         if data is None:
-            print(f"  Page {page} ignorée")
-            continue
-        ids = extract_product_ids(data, universe_filter=1)
-        all_ids.update(ids)
-        print(f"Page {page}/{total_pages} → {len(ids)} films, total: {len(all_ids)}")
-        time.sleep(0.5)  # augmente un peu la pause
+            print(f"  Page offset={offset} échouée, arrêt.")
+            break
+
+        collection = data["data"]["user"]["collection"]
+
+        if total is None:
+            total = collection["total"]
+            print(f"Total films dans la collection : {total}")
+
+        products = collection["products"]
+        if not products:
+            break
+
+        ids = [p["id"] for p in products]
+        all_ids.extend(ids)
+        print(f"offset={offset} → {len(ids)} films, total récupéré : {len(all_ids)}/{total}")
+
+        if len(all_ids) >= total:
+            break
+
+        offset += limit
+        time.sleep(0.5)
 
     os.makedirs("data/raw", exist_ok=True)
     with open("data/raw/film_ids.json", "w") as f:
-        json.dump(list(all_ids), f)
-    print(f"\nTotal IDs sauvegardés : {len(all_ids)}")
+        json.dump(list(set(all_ids)), f)
+    print(f"\nTotal IDs sauvegardés : {len(set(all_ids))}")
