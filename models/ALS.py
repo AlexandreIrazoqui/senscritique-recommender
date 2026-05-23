@@ -62,27 +62,29 @@ class ALSExplicit:
 
     def _update_users(self, reg_I):
         # Thread-safe : chaque itération écrit sur une ligne distincte de self.P (indexée par u)
+        indptr, indices, data = self.R_user.indptr, self.R_user.indices, self.R_user.data
         for u in range(self.n_users):
-            row = self.R_user[u]
-            if row.nnz == 0:
+            start, end = indptr[u], indptr[u + 1]
+            if start == end:
                 continue
-            items, r = row.indices, row.data.astype(float)
+            items = indices[start:end]
+            r = data[start:end].astype(float)
             if self.use_bias:
                 r -= self.mu + self.bu[u] + self.bi[items]
             Y = self.Q[items]
-            #On résout les moindres carrés pour l'user
             self.P[u] = np.linalg.solve(Y.T @ Y + reg_I, Y.T @ r)
 
     def _update_items(self, reg_I):
+        indptr, indices, data = self.R_item.indptr, self.R_item.indices, self.R_item.data
         for i in range(self.n_items):
-            col = self.R_item[i]
-            if col.nnz == 0:
+            start, end = indptr[i], indptr[i + 1]
+            if start == end:
                 continue
-            users, r = col.indices, col.data.astype(float)
+            users = indices[start:end]
+            r = data[start:end].astype(float)
             if self.use_bias:
                 r -= self.mu + self.bu[users] + self.bi[i]
             X = self.P[users]
-            #On resout les moindres carrés pour l'item
             self.Q[i] = np.linalg.solve(X.T @ X + reg_I, X.T @ r)
 
     def _init_rmse_sample(self, rng, n=200_000):
@@ -109,6 +111,7 @@ class ALSExplicit:
         scores = self.Q @ self.P[u]
         if self.use_bias:
             scores += self.mu + self.bu[u] + self.bi
+        scores = np.clip(scores, 1, 10)
         if exclude_rated:
             scores[self.R_user[u].indices] = -np.inf
         return np.argsort(scores)[::-1][:n]
