@@ -4,8 +4,9 @@ from pathlib import Path
 import pandas as pd
 from scipy.sparse import csr_matrix, save_npz, load_npz
 from sklearn.preprocessing import LabelEncoder
+import numpy as np
 
-
+#Ce sont les fonctions définies dans le Notebook, qui documente la démarche
 def load_raw_data(films_path, ratings_path):
     films = pd.read_csv(films_path).rename(columns={'product_id': 'film_id'})
     ratings = pd.read_csv(ratings_path).rename(columns={'product_id': 'film_id'})
@@ -53,6 +54,17 @@ def build_sparse_matrix(ratings, shape_order='user_item'):
              (ratings['film_id'].values, ratings['user_id'].values)),
             shape=(n_films, n_users)
         )
+
+
+def train_test_split_ratings(R, test_ratio=0.2, random_state=67):
+    rng = np.random.default_rng(random_state)
+    R = R.tocoo()
+    test_mask = rng.random(len(R.data)) < test_ratio
+
+    R_train = csr_matrix((R.data[~test_mask], (R.row[~test_mask], R.col[~test_mask])), shape=R.shape)
+    R_test  = csr_matrix((R.data[ test_mask], (R.row[ test_mask], R.col[ test_mask])), shape=R.shape)
+
+    return R_train, R_test
 
 
 def save_artifacts(output_dir, sparse_matrix, user_encoder, film_encoder, films_df):
