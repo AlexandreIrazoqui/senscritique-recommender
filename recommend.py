@@ -2,9 +2,6 @@
 CLI de recommandation de films — modèle ALS entraîné sur SensCritique.
 
     .venv/bin/python recommend.py
-
-Premier lancement : entraîne le modèle (~5-10 min) et le met en cache.
-Lancements suivants : charge le cache en quelques secondes.
 """
 import difflib
 import pickle
@@ -70,7 +67,6 @@ def _normalize(text):
 
 
 def search_film(query, films_df, film_encoder):
-    """Retourne (film_id, titre) ou (None, None). Exact > plus court contenant > fuzzy."""
     q           = _normalize(query)
     norm_titles = films_df["title"].apply(_normalize).tolist()
     film_ids    = films_df["film_id"].tolist()
@@ -109,6 +105,22 @@ def get_user_id_from_username(username):
     return resp.json()["data"]["user"]["id"]
 
 
+_COLLECTION_QUERY = """
+query UserCollectionFilms($userId: Int!, $universe: String, $limit: Int, $offset: Int) {
+    user(id: $userId) {
+        collection(universe: $universe, limit: $limit, offset: $offset) {
+            products {
+                id
+                title
+                otherUserInfos {
+                    rating
+                }
+            }
+        }
+    }
+}
+"""
+
 def get_user_seen_films(user_id, limit=100):
     seen, offset = [], 0
     while True:
@@ -120,16 +132,7 @@ def get_user_seen_films(user_id, limit=100):
                 "limit":    limit,
                 "offset":   offset,
             },
-            "query": """
-            query UserCollectionFilms($userId: Int!, $universe: String,
-                                      $limit: Int, $offset: Int) {
-                user(id: $userId) {
-                    collection(universe: $universe, limit: $limit, offset: $offset) {
-                        products { id title rating }
-                    }
-                }
-            }
-            """,
+            "query": _COLLECTION_QUERY,
         }
         resp = requests.post(SC_API, headers=SC_HEADERS, json=payload, timeout=15)
         resp.raise_for_status()
@@ -137,28 +140,28 @@ def get_user_seen_films(user_id, limit=100):
         if not products:
             break
         for p in products:
-            seen.append({"id": p["id"], "title": p["title"], "rating": p["rating"]})
+            info = p.get("otherUserInfos") or {}
+            seen.append({"id": p["id"], "title": p["title"], "rating": info.get("rating")})
         offset += limit
         time.sleep(0.4)
     return seen
 
 
-def fold_in(rated_enc, rated_values, model):
-    """Calcule les scores pour n'importe quel user en répliquant l'update + le biais user de l'entraînement.
+def fold_in(model, rated_enc, rated_values):
+    """Reproduit _update_users : sur les notes d'entraînement d'un user connu,
+    redonne P[u] exactement. Pour un nouveau, meilleure approx à partir de ses notes."""
+    if len(rated_enc) == 0:
+        return np.zeros(model.n_factors)
 
-    Pour un user connu, ça reproduit son P[u] entraîné (cosinus ~0.9999 vérifié) ;
-    pour un nouveau, c'est la meilleure approximation possible à partir de ses notes.
-    """
     items = np.array(rated_enc)
     r     = np.array(rated_values, dtype=float)
-    bu    = float(r.mean() - model.mu)               # biais user estimé comme à l'entraînement
+    bu    = float(r.mean() - model.mu)
     r_adj = r - model.mu - bu - model.bi[items]
     Y     = model.Q[items]
-    w     = model.w_i[items]                          # mêmes poids IPS qu'à l'entraînement
+    w     = model.w_i[items] if hasattr(model, "w_i") else np.ones(len(items))
     Yw    = Y * w[:, None]
-    reg_I = model.reg * np.eye(model.n_factors)        # le MÊME reg que l'entraînement
-    p_new = np.linalg.solve(Yw.T @ Y + reg_I, Yw.T @ r_adj)
-    return model.Q @ p_new + model.mu + bu + model.bi
+    reg_I = model.reg * np.eye(model.n_factors)
+    return np.linalg.solve(Yw.T @ Y + reg_I, Yw.T @ r_adj)
 
 
 def print_recos(scores, exclude_enc, film_encoder, films_df):
@@ -171,7 +174,7 @@ def print_recos(scores, exclude_enc, film_encoder, films_df):
         film_id = film_encoder.inverse_transform([idx])[0]
         row     = films_df[films_df["film_id"] == film_id]
         title   = row["title"].values[0] if len(row) else str(film_id)
-        print(rank, ".", title, "| score :", round(float(np.clip(s[idx], 1, 10)), 2))
+        print(rank, ".", title)
 
 
 def mode_manuel(model, films_df, film_encoder):
@@ -179,42 +182,33 @@ def mode_manuel(model, films_df, film_encoder):
     print("Entrez des films avec une note /10.")
     print("")
 
-    rated_enc    = []
-    rated_values = []
-    seen_enc     = set()
+    rated_enc, rated_values, seen_enc = [], [], set()
 
     while True:
         titre = input("Film (vide pour terminer) : ").strip()
         if not titre:
             break
-
         film_id, found = search_film(titre, films_df, film_encoder)
         if film_id is None:
-            print("  Film introuvable dans la base")
+            print("  Film introuvable")
             continue
         print("  Trouvé :", found)
-
         note_str = input("  Note /10 : ").strip()
         try:
             note = float(note_str)
-            if not (1 <= note <= 10):
-                raise ValueError
         except ValueError:
-            print("  Note ignorée (doit être entre 1 et 10)")
             continue
-
         enc = int(film_encoder.transform([film_id])[0])
         rated_enc.append(enc)
         rated_values.append(note)
         seen_enc.add(enc)
 
     if not rated_enc:
-        print("Aucun film saisi, abandon.")
         return
 
-    print("")
-    print("Calcul des recommandations...")
-    scores = fold_in(rated_enc, rated_values, model)
+    p      = fold_in(model, rated_enc, rated_values)
+    bu     = float(np.array(rated_values).mean() - model.mu)
+    scores = model.Q @ p + model.mu + bu + model.bi
     print_recos(scores, seen_enc, film_encoder, films_df)
 
 
@@ -224,27 +218,22 @@ def mode_pseudo(model, films_df, film_encoder):
     if not username:
         return
 
-    print("Récupération de l'ID utilisateur...")
     try:
         user_id = get_user_id_from_username(username)
     except Exception as e:
         print("Erreur API :", e)
         return
-    print("ID :", user_id)
 
-    print("Récupération de la collection...")
     try:
-        seen_films = get_user_seen_films(user_id)
+        seen = get_user_seen_films(user_id)
     except Exception as e:
         print("Erreur collection :", e)
-        return
-    print("Films vus :", len(seen_films))
+        seen = []
+    print("Films vus :", len(seen))
 
     valid_ids = set(film_encoder.classes_)
-
-    seen_enc = set()
-    rated_enc, rated_values = [], []
-    for f in seen_films:
+    rated_enc, rated_values, seen_enc = [], [], set()
+    for f in seen:
         if f["id"] in valid_ids:
             enc = int(film_encoder.transform([f["id"]])[0])
             seen_enc.add(enc)
@@ -253,24 +242,25 @@ def mode_pseudo(model, films_df, film_encoder):
                 rated_values.append(float(f["rating"]))
 
     if not rated_enc:
-        print("Aucune note exploitable dans la collection.")
+        print("Aucune note exploitable.")
         return
     print("Notes utilisables :", len(rated_enc))
 
-    scores = fold_in(rated_enc, rated_values, model)
+    p      = fold_in(model, rated_enc, rated_values)
+    bu     = float(np.array(rated_values).mean() - model.mu)
+    scores = model.Q @ p + model.mu + bu + model.bi
 
     print("")
     print("Recommandations pour", username, ":")
     print_recos(scores, seen_enc, film_encoder, films_df)
 
 
-# main
-
 if __name__ == "__main__":
     cache        = load_model()
     model        = cache["model"]
     films_df     = cache["films_df"]
     film_encoder = cache["film_encoder"]
+    user_encoder = cache["user_encoder"]
 
     print("")
     print("=== Recommandeur SensCritique ===")
