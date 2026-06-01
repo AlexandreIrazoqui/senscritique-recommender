@@ -4,11 +4,14 @@ from threadpoolctl import threadpool_limits
 
 class ALSExplicit:
     def __init__(self, n_factors=50, n_iterations=15, reg=0.1,
-                 use_bias=True, random_state=None, verbose=True):
+                 use_bias=True, use_ips=True, ips_alpha=1.0,
+                 random_state=None, verbose=True):
         self.n_factors = n_factors
         self.n_iterations = n_iterations
         self.reg = reg
         self.use_bias = use_bias
+        self.use_ips = use_ips
+        self.ips_alpha = ips_alpha
         self.random_state = random_state
         self.verbose = verbose
 
@@ -24,6 +27,7 @@ class ALSExplicit:
 
         if self.use_bias:
             self._fit_biases()
+        self._compute_weights()
 
         self._init_rmse_sample(rng)
         reg_I = self.reg * np.eye(self.n_factors)
@@ -72,20 +76,28 @@ class ALSExplicit:
             if self.use_bias:
                 r -= self.mu + self.bu[u] + self.bi[items]
             Y = self.Q[items]
-            self.P[u] = np.linalg.solve(Y.T @ Y + reg_I, Y.T @ r)
+            w = self.w_i[items]            # poids IPS des films notés par u
+            Yw = Y * w[:, None]            # = W Y, ligne par ligne
+            self.P[u] = np.linalg.solve(Yw.T @ Y + reg_I, Yw.T @ r)
+
 
     def _update_items(self, reg_I):
         indptr, indices, data = self.R_item.indptr, self.R_item.indices, self.R_item.data
         for i in range(self.n_items):
             start, end = indptr[i], indptr[i + 1]
+
             if start == end:
                 continue
+
             users = indices[start:end]
             r = data[start:end].astype(float)
+
             if self.use_bias:
                 r -= self.mu + self.bu[users] + self.bi[i]
             X = self.P[users]
-            self.Q[i] = np.linalg.solve(X.T @ X + reg_I, X.T @ r)
+
+            wi = self.w_i[i]
+            self.Q[i] = np.linalg.solve(wi * (X.T @ X) + reg_I, wi * (X.T @ r))
 
     def _init_rmse_sample(self, rng, n=200_000):
         # Échantillon fixe pour monitorer le RMSE sans parcourir les 46M ratings
@@ -125,3 +137,18 @@ class ALSExplicit:
             ), 1, 10
         )
         return float(np.sqrt(np.mean((R_test.data - preds) ** 2)))
+
+    def _compute_weights(self):
+        # Poids de propension niveau-item pour corriger le biais de POPULARITÉ (IPS)
+        # (PAS la positivité de Schnabel : on ne touche pas à la valeur des notes).
+        if not self.use_ips:
+            self.w_i = np.ones(self.n_items)   # version non pondérée = ALS classique
+            return
+        n_i = np.bincount(self.R_user.indices, minlength=self.n_items)
+        # propension : p_i = n_i / N_users  (proba qu'une note de i soit observée)
+        p_i = n_i / self.n_users
+        # Un film populaire (p_i grand) est sur-représenté dans les observations,
+        # on le SOUS-pondère ; un film de niche on fait l'inverse
+        # ips_alpha < 1 tempère les poids extrêmes : ratio 1000x → ~30x à 0.5, ~10x à 0.3
+        w_i = (1.0 / p_i) ** self.ips_alpha
+        self.w_i = w_i / w_i.mean()

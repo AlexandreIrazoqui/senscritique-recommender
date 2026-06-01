@@ -73,7 +73,7 @@ def load_or_train():
     R = build_sparse_matrix(ratings)
     print("shape :", R.shape, "| nnz :", R.nnz)
 
-    model = ALSExplicit(n_factors=20, n_iterations=15, reg=20.0, random_state=RANDOM_STATE)
+    model = ALSExplicit(n_factors=20, n_iterations=15, reg=20.0, use_ips=True, ips_alpha=0.3, random_state=RANDOM_STATE)
     model.fit(R)
 
     cache = dict(

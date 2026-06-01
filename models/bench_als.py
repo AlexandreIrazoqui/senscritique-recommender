@@ -24,7 +24,7 @@ print()
 
 # Modèle (n_factors=20, reg=20, 15 iter)
 print("--- Modèle (20 factors, reg=20, 15 iter) ---")
-model = ALSExplicit(n_factors=20, n_iterations=15, reg=20.0, verbose=False, random_state=0)
+model = ALSExplicit(n_factors=20, n_iterations=15, reg=20.0, use_ips=True, ips_alpha=0.3, verbose=False, random_state=0)
 t0 = time.time()
 model.fit(R_train)
 t = time.time() - t0

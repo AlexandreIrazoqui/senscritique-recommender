@@ -25,7 +25,6 @@ SC_HEADERS  = {
     "User-Agent":   "Mozilla/5.0 (X11; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0",
 }
 N_RECO      = 10
-FOLD_IN_REG = 20.0
 
 
 def load_model():
@@ -47,7 +46,8 @@ def load_model():
     ratings, user_encoder, film_encoder = encode_ids(ratings)
     R = build_sparse_matrix(ratings)
 
-    model = ALSExplicit(n_factors=20, n_iterations=15, reg=20.0, random_state=67)
+    model = ALSExplicit(n_factors=20, n_iterations=15, reg=20.0,
+                        use_ips=True, ips_alpha=0.3, random_state=67)
     model.fit(R)
 
     cache = dict(model=model, films_df=films_df,
@@ -144,13 +144,21 @@ def get_user_seen_films(user_id, limit=100):
 
 
 def fold_in(rated_enc, rated_values, model):
-    """Calcule un vecteur scores pour un utilisateur absent de la base."""
+    """Calcule les scores pour n'importe quel user en répliquant l'update + le biais user de l'entraînement.
+
+    Pour un user connu, ça reproduit son P[u] entraîné (cosinus ~0.9999 vérifié) ;
+    pour un nouveau, c'est la meilleure approximation possible à partir de ses notes.
+    """
     items = np.array(rated_enc)
     r     = np.array(rated_values, dtype=float)
-    r_adj = r - model.mu - model.bi[items]
+    bu    = float(r.mean() - model.mu)               # biais user estimé comme à l'entraînement
+    r_adj = r - model.mu - bu - model.bi[items]
     Y     = model.Q[items]
-    p_new = np.linalg.solve(Y.T @ Y + FOLD_IN_REG * np.eye(model.n_factors), Y.T @ r_adj)
-    return model.Q @ p_new + model.mu + model.bi
+    w     = model.w_i[items]                          # mêmes poids IPS qu'à l'entraînement
+    Yw    = Y * w[:, None]
+    reg_I = model.reg * np.eye(model.n_factors)        # le MÊME reg que l'entraînement
+    p_new = np.linalg.solve(Yw.T @ Y + reg_I, Yw.T @ r_adj)
+    return model.Q @ p_new + model.mu + bu + model.bi
 
 
 def print_recos(scores, exclude_enc, film_encoder, films_df):
@@ -210,7 +218,7 @@ def mode_manuel(model, films_df, film_encoder):
     print_recos(scores, seen_enc, film_encoder, films_df)
 
 
-def mode_pseudo(model, films_df, film_encoder, user_encoder):
+def mode_pseudo(model, films_df, film_encoder):
     print("")
     username = input("Pseudo SensCritique : ").strip()
     if not username:
@@ -229,35 +237,27 @@ def mode_pseudo(model, films_df, film_encoder, user_encoder):
         seen_films = get_user_seen_films(user_id)
     except Exception as e:
         print("Erreur collection :", e)
-        seen_films = []
+        return
     print("Films vus :", len(seen_films))
 
     valid_ids = set(film_encoder.classes_)
 
     seen_enc = set()
+    rated_enc, rated_values = [], []
     for f in seen_films:
         if f["id"] in valid_ids:
-            seen_enc.add(int(film_encoder.transform([f["id"]])[0]))
-
-    if user_id in set(user_encoder.classes_):
-        print("Utilisateur dans la base → vecteur ALS existant")
-        u_enc  = int(user_encoder.transform([user_id])[0])
-        scores = model.Q @ model.P[u_enc] + model.mu + model.bu[u_enc] + model.bi
-        scores = np.clip(scores, 1, 10)
-    else:
-        print("Utilisateur absent de la base → fold-in sur ses notes")
-        rated_enc, rated_values = [], []
-        for f in seen_films:
-            if f["rating"] and f["id"] in valid_ids:
-                enc = int(film_encoder.transform([f["id"]])[0])
+            enc = int(film_encoder.transform([f["id"]])[0])
+            seen_enc.add(enc)
+            if f["rating"]:
                 rated_enc.append(enc)
                 rated_values.append(float(f["rating"]))
 
-        if not rated_enc:
-            print("Aucune note exploitable dans la collection.")
-            return
-        print("Notes utilisables :", len(rated_enc))
-        scores = fold_in(rated_enc, rated_values, model)
+    if not rated_enc:
+        print("Aucune note exploitable dans la collection.")
+        return
+    print("Notes utilisables :", len(rated_enc))
+
+    scores = fold_in(rated_enc, rated_values, model)
 
     print("")
     print("Recommandations pour", username, ":")
@@ -271,7 +271,6 @@ if __name__ == "__main__":
     model        = cache["model"]
     films_df     = cache["films_df"]
     film_encoder = cache["film_encoder"]
-    user_encoder = cache["user_encoder"]
 
     print("")
     print("=== Recommandeur SensCritique ===")
@@ -284,6 +283,6 @@ if __name__ == "__main__":
     if choix == "1":
         mode_manuel(model, films_df, film_encoder)
     elif choix == "2":
-        mode_pseudo(model, films_df, film_encoder, user_encoder)
+        mode_pseudo(model, films_df, film_encoder)
     else:
         print("Choix invalide.")
