@@ -6,21 +6,13 @@ CLI de recommandation de films — modèle ALS entraîné sur SensCritique.
 import difflib
 import pickle
 import string
-import time
 import unicodedata
 from pathlib import Path
 
 import numpy as np
-import requests
+import pandas as pd
 
 CACHE_FILE  = Path("data/models/als_eval_cache.pkl")
-SC_API      = "https://apollo.senscritique.com/"
-SC_HEADERS  = {
-    "content-type": "application/json",
-    "Origin":       "https://www.senscritique.com",
-    "Referer":      "https://www.senscritique.com/",
-    "User-Agent":   "Mozilla/5.0 (X11; Linux x86_64; rv:149.0) Gecko/20100101 Firefox/149.0",
-}
 N_RECO      = 10
 
 
@@ -94,62 +86,11 @@ def search_film(query, films_df, film_encoder):
     return None, None
 
 
-def get_user_id_from_username(username):
-    payload = {
-        "operationName": "User",
-        "variables":     {"username": username},
-        "query":         "query User($username: String!) { user(username: $username) { id } }",
-    }
-    resp = requests.post(SC_API, headers=SC_HEADERS, json=payload, timeout=10)
-    resp.raise_for_status()
-    return resp.json()["data"]["user"]["id"]
-
-
-_COLLECTION_QUERY = """
-query UserCollectionFilms($userId: Int!, $universe: String, $limit: Int, $offset: Int) {
-    user(id: $userId) {
-        collection(universe: $universe, limit: $limit, offset: $offset) {
-            products {
-                id
-                title
-                otherUserInfos {
-                    rating
-                }
-            }
-        }
-    }
-}
-"""
-
-def get_user_seen_films(user_id, limit=100):
-    seen, offset = [], 0
-    while True:
-        payload = {
-            "operationName": "UserCollectionFilms",
-            "variables": {
-                "userId":   user_id,
-                "universe": "movie",
-                "limit":    limit,
-                "offset":   offset,
-            },
-            "query": _COLLECTION_QUERY,
-        }
-        resp = requests.post(SC_API, headers=SC_HEADERS, json=payload, timeout=15)
-        resp.raise_for_status()
-        products = resp.json()["data"]["user"]["collection"]["products"]
-        if not products:
-            break
-        for p in products:
-            info = p.get("otherUserInfos") or {}
-            seen.append({"id": p["id"], "title": p["title"], "rating": info.get("rating")})
-        offset += limit
-        time.sleep(0.4)
-    return seen
+COLD_START_THRESHOLD = 20
 
 
 def fold_in(model, rated_enc, rated_values):
-    """Reproduit _update_users : sur les notes d'entraînement d'un user connu,
-    redonne P[u] exactement. Pour un nouveau, meilleure approx à partir de ses notes."""
+    """Solve ALS pour le vecteur latent d'un nouvel utilisateur."""
     if len(rated_enc) == 0:
         return np.zeros(model.n_factors)
 
@@ -162,6 +103,30 @@ def fold_in(model, rated_enc, rated_values):
     Yw    = Y * w[:, None]
     reg_I = model.reg * np.eye(model.n_factors)
     return np.linalg.solve(Yw.T @ Y + reg_I, Yw.T @ r_adj)
+
+
+def score_new_user(model, rated_enc, rated_values):
+    """Score tous les items pour un nouvel utilisateur.
+    < COLD_START_THRESHOLD notes : similarité cosinus au centroïde pondéré par
+    les notes (le fold-in ALS n'a pas assez de signal avec le modèle IPS).
+    >= COLD_START_THRESHOLD notes : fold-in ALS classique."""
+    items = np.array(rated_enc)
+    r     = np.array(rated_values, dtype=float)
+
+    if len(items) >= COLD_START_THRESHOLD:
+        p  = fold_in(model, rated_enc, rated_values)
+        bu = float(r.mean() - model.mu)
+        return model.Q @ p + model.mu + bu + model.bi
+
+    weights  = np.maximum(r - model.mu, 0.1)
+    centroid = (model.Q[items] * weights[:, None]).sum(axis=0)
+    c_norm   = np.linalg.norm(centroid)
+    if c_norm == 0:
+        return model.bi.copy()
+    centroid /= c_norm
+    q_norms = np.linalg.norm(model.Q, axis=1)
+    q_norms[q_norms == 0] = 1.0
+    return (model.Q @ centroid) / q_norms
 
 
 def print_recos(scores, exclude_enc, film_encoder, films_df):
@@ -206,52 +171,89 @@ def mode_manuel(model, films_df, film_encoder):
     if not rated_enc:
         return
 
-    p      = fold_in(model, rated_enc, rated_values)
-    bu     = float(np.array(rated_values).mean() - model.mu)
-    scores = model.Q @ p + model.mu + bu + model.bi
+    scores = score_new_user(model, rated_enc, rated_values)
     print_recos(scores, seen_enc, film_encoder, films_df)
 
 
-def mode_pseudo(model, films_df, film_encoder):
+MAPPING_FILE = Path("data/processed/title_mapping.csv")
+
+
+def load_title_mapping():
+    """Charge la table de correspondance Letterboxd → SensCritique."""
+    if not MAPPING_FILE.exists():
+        return {}
+    df = pd.read_csv(MAPPING_FILE)
+    mapping = {}
+    for _, r in df.iterrows():
+        key = _normalize(str(r["lb_title"]))
+        mapping[key] = int(r["product_id"])
+    return mapping
+
+
+def mode_csv(model, films_df, film_encoder):
     print("")
-    username = input("Pseudo SensCritique : ").strip()
-    if not username:
+    csv_path = input("Chemin vers le fichier CSV : ").strip()
+    if not csv_path:
+        return
+
+    path = Path(csv_path)
+    if not path.exists():
+        print("Fichier introuvable :", csv_path)
         return
 
     try:
-        user_id = get_user_id_from_username(username)
+        user_df = pd.read_csv(path)
     except Exception as e:
-        print("Erreur API :", e)
+        print("Erreur lecture CSV :", e)
         return
 
-    try:
-        seen = get_user_seen_films(user_id)
-    except Exception as e:
-        print("Erreur collection :", e)
-        seen = []
-    print("Films vus :", len(seen))
+    if "Title" not in user_df.columns or "Rating10" not in user_df.columns:
+        print("Colonnes manquantes (attendu : Title, Rating10)")
+        return
 
+    lb_to_sc = load_title_mapping()
     valid_ids = set(film_encoder.classes_)
+
     rated_enc, rated_values, seen_enc = [], [], set()
-    for f in seen:
-        if f["id"] in valid_ids:
-            enc = int(film_encoder.transform([f["id"]])[0])
-            seen_enc.add(enc)
-            if f["rating"]:
-                rated_enc.append(enc)
-                rated_values.append(float(f["rating"]))
+    not_found, not_in_model = [], []
+
+    for _, row in user_df.iterrows():
+        title = str(row["Title"]).strip()
+        norm = _normalize(title)
+
+        film_id = lb_to_sc.get(norm)
+        if film_id is None:
+            film_id, _ = search_film(title, films_df, film_encoder)
+        if film_id is None:
+            not_found.append(title)
+            continue
+        if film_id not in valid_ids:
+            not_in_model.append(title)
+            continue
+
+        enc = int(film_encoder.transform([film_id])[0])
+        seen_enc.add(enc)
+        rating = row.get("Rating10")
+        if pd.notna(rating):
+            try:
+                rating = float(rating)
+            except (ValueError, TypeError):
+                continue
+            rated_enc.append(enc)
+            rated_values.append(rating)
+
+    print(f"Films matchés : {len(seen_enc)} / {len(user_df)}")
+    if not_found:
+        print(f"Non trouvés ({len(not_found)}) :")
+        for t in not_found:
+            print(f"  - {t}")
 
     if not rated_enc:
         print("Aucune note exploitable.")
         return
-    print("Notes utilisables :", len(rated_enc))
+    print(f"Notes utilisables : {len(rated_enc)}")
 
-    p      = fold_in(model, rated_enc, rated_values)
-    bu     = float(np.array(rated_values).mean() - model.mu)
-    scores = model.Q @ p + model.mu + bu + model.bi
-
-    print("")
-    print("Recommandations pour", username, ":")
+    scores = score_new_user(model, rated_enc, rated_values)
     print_recos(scores, seen_enc, film_encoder, films_df)
 
 
@@ -266,13 +268,13 @@ if __name__ == "__main__":
     print("=== Recommandeur SensCritique ===")
     print("")
     print("1. Entrer des films manuellement")
-    print("2. Utiliser un pseudo SensCritique")
+    print("2. Importer un fichier CSV")
     print("")
     choix = input("Choix (1 ou 2) : ").strip()
 
     if choix == "1":
         mode_manuel(model, films_df, film_encoder)
     elif choix == "2":
-        mode_pseudo(model, films_df, film_encoder)
+        mode_csv(model, films_df, film_encoder)
     else:
         print("Choix invalide.")
