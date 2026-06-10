@@ -24,7 +24,7 @@ ALPHAS        = [1.0, 0.5, 0.3]
 CONFIG        = dict(n_factors=20, n_iterations=15, reg=20.0,
                      random_state=RANDOM_STATE, verbose=False)
 
-# ── Données ───────────────────────────────────────────────────────────────────
+# Données
 
 print("Chargement...")
 _, ratings = load_raw_data("data/processed/films.csv", "data/processed/all_ratings.csv")
@@ -53,7 +53,7 @@ _sort_idx    = np.argsort(n_i)
 _sorted_n_i  = n_i[_sort_idx]
 
 
-# ── RMSE ─────────────────────────────────────────────────────────────────────
+#  RMSE
 
 def rmse_tertiles(preds):
     preds = np.clip(preds, 1, 10)
@@ -64,7 +64,7 @@ def rmse_tertiles(preds):
     return out
 
 
-# ── Ranking ───────────────────────────────────────────────────────────────────
+#  Rankin
 
 log2_ranks = np.log2(np.arange(2, 12))
 
@@ -127,7 +127,7 @@ def eval_ranking(score_fn, eval_users, R_test_csr, R_train_csr):
     return float(np.mean(hr_list)), float(np.mean(ndcg_list))
 
 
-# ── Entraînement ──────────────────────────────────────────────────────────────
+#  Entraînement
 
 print("--- ALS standard (baseline) ---")
 t0 = time.time()
@@ -145,7 +145,7 @@ for alpha in ALPHAS:
     print(f"Entraîné en {time.time() - t0:.1f}s\n")
 
 
-# ── Résultats RMSE ────────────────────────────────────────────────────────────
+# Résultats RMSE
 
 rmse_res = {
     "biais seuls": rmse_tertiles(m_base.mu + m_base.bu[rows_test] + m_base.bi[cols_test]),
@@ -175,7 +175,7 @@ print("=" * (30 + col_w * len(rmse_res)))
 print()
 
 
-# ── Résultats Ranking ─────────────────────────────────────────────────────────
+#  Résultats Ranking
 
 R_test_csr  = R_test.tocsr()
 R_train_csr = R_train.tocsr()

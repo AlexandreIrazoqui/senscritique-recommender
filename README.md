@@ -4,6 +4,7 @@ A collaborative filtering movie recommendation system built on data scraped from
 
 > **🎬 Live demo:** try the model in your browser → [**MovieRecommender on HuggingFace Spaces**](https://huggingface.co/spaces/AlexandreIrazoqui/MovieRecommender)
 > Paste a Letterboxd/Senscritique export (or rate a few films by hand) and get personalized recommendations.
+> The full approach behind each stage : scraping strategy, filtering thresholds, model selection, IPS tuning, and evaluation protocol — is documented in [**Rendu.pdf**](Rendu.pdf).
 
 <p align="center">
   <img src="site.png" alt="MovieRecommender web app — rated films and Top 10 recommendations" width="460">
